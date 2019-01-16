@@ -1,15 +1,15 @@
-from telegram.ext import Updater, InlineQueryHandler, CommandHandler
+from telegram.ext import Updater, CommandHandler
 import praw
 import prawcore
 import logging
-import re
+import os
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG)
 
-reddit = praw.Reddit('SMRedditBot')  # change the ini var
-subredditdata = None
-submissiondata = []
-
+reddit = praw.Reddit('Bot')  # change the ini var
+TOKEN='token' # telegram api key
+PORT = os.environ.get('PORT')
+NAME = "bot"
 
 def help(bot, update):
     message = '/all : access frontpage and fetches the hottest posts\n'\
@@ -19,88 +19,91 @@ def help(bot, update):
 
     update.message.reply_text(message)
 
-# deprecated
-def reset():
-    subredditdata = None
-    submissiondata = []
+def help(bot, update):
+    message = 'Hello! I am RedditBot! Whatcha planning to do today?\n\n'\
+        '/(r, get, fetch) <subreddit> : fetches a post from <subreddit>\n'\
+        '/reset <subreddit> : resets already seen posts in <subreddit>\n'
+
+    update.message.reply_text(message)
 
 
-def viewmedia(bot, chat_id, submission):
-    if submission.url.endswith(('.jpg','.png')):
-        bot.send_photo(chat_id, submission.url, caption='Title: {}'.format(submission.title))
-    else:
-        bot.send_message(chat_id, text='Title: {}\nURL: {}\n'
-                         .format(submission.title, submission.shortlink),
-                         disable_web_page_preview=True)
-
-
-def view(bot, update):
-    chatid = update.message.chat_id
-    _, query = update.message.text.split()
-    try:
-        number = int(query) - 1
-        if number < 0 or number >= len(submissiondata):
-            bot.send_message(chatid, text='Invalid post number!', disable_web_page_preview=True)
-        elif submissiondata:
-            submission = submissiondata[number]
-            viewmedia(bot, chatid, submission)
-        else:
-            bot.send_message(chatid, text='Pick a subreddit first', disable_web_page_preview=True)
-    except Exception as e:
-        print(e)
-        bot.send_message(chatid, text='Invalid post number!', disable_web_page_preview=True)
-
-
-def all(bot, update):
-    chatid = update.message.chat_id
-    frontpage = reddit.front.hot(limit=5)
-    i = 1
-    message = 'Fresh from r/all\n\n'
-    for submission in frontpage:
-        if i > 3:
-            break
-        elif submission.stickied or submission.over_18:
-            continue
-        else:
-            message += 'Title: {}\nUpvotes: {}\nLink: {}\n\n' \
-                .format(submission.title, submission.score, submission.shortlink)
-            i = i + 1
-    bot.send_message(chatid, text=message, disable_web_page_preview=True)
-
-
-def getsubreddit(bot, update):
-    _, query = update.message.text.split()
-    chatid = update.message.chat_id
-    try:
-        subreddit = reddit.subreddit(query)
-        if subreddit.over18:
-            bot.send_message(chatid, text='Hey! This subreddit is NSFW!')
-        else:
-            reset()
-            subredditdata = subreddit.hot(limit=5)
-            i = 1
-            message = 'Fresh from r/{}\n\n'.format(query)
-            for submission in subredditdata:
-                if i > 3:
-                    break
-                elif submission.stickied or submission.over_18:
-                    continue
-                else:
-                    submissiondata.append(submission)
-                    message += 'Title: {}\nUpvotes: {}\nLink: {}\n\n'\
-                        .format(submission.title, submission.score, submission.shortlink)
-                    i = i + 1
-            bot.send_message(chatid, text=message, disable_web_page_preview=True)
-    except prawcore.exceptions.Redirect:
-        bot.send_message(chatid, text="Subreddit {} does not exist!".format(query))
-    except prawcore.exceptions.NotFound:
-        bot.send_message(chatid, text="Subreddit {} does not exist!".format(query))
-
-
-def resetposts(bot, update):
+def fetchfreshpost(bot, update):
     _, *query = update.message.text.split()
     if not query or query[0] == 'all':
-        srlist = reddit.front.hot(limit=10)
+        sendfreshpost(bot, update, reddit.front)
+    else:
+        check = checksubreddit(query[0])
+        if check > 0:
+            errorhandler(bot, update, check)
+        else:
+            sendfreshpost(bot,update, reddit.subreddit(query[0]))
+
+
+def sendfreshpost(bot, update, sr):
+    srlist = sr.hot(limit=15)
+    sent = False
+    for submission in srlist:
+        if submission.stickied or submission.over_18 or submission.hidden:
+            continue
+        else:
+            submission.hide()
+            if submission.url.endswith(('.jpg', '.png')):
+                # reddit-hosted images / imgur-hosted images
+                update.message.reply_photo(photo=submission.url,
+                                           caption='Title: {}'.format(submission.title),
+                                           quote=True)
+                sent = True
+                break
+            elif 'gyfcat' in submission.url:
+                # gyfcat-hosted gifs
+                update.message.reply_video(video=submission.url + '.mp4',
+                                           caption='Title: {}'.format(submission.title),
+                                           quote=True)
+                sent = True
+                break
+            elif submission.url.endswith(('.gif', '.gifv')):
+                # imgur-hosted gifs
+                update.message.reply_video(video=submission.url[0:submission.url.find('.gif')] + '.mp4',
+                                           caption='Title: {}'.format(submission.title),
+                                           quote=True)
+                sent = True
+                break
+            else:
+                # any other media
+                update.message.reply_text(text='Title: {}\nURL: {}\n'
+                                          .format(submission.title, submission.url), quote=True)
+                sent = True
+                break
+    if not sent:
+        update.message.reply_text(text='Sorry, we seem to have ran out of fresh content')
+
+
+def errorhandler(bot, update, error=0):
+    if error == 1:
+        update.message.reply_text("Sorry, the subreddit is NSFW!", quote=True)
+    elif error == 2:
+        update.message.reply_text("Sorry, the subreddit does not exist!", quote=True)
+    else:
+        update.message.reply_text("Unknown error", quote=True)
+
+
+def checksubreddit(sub):
+    try:
+        sr = reddit.subreddit(sub)
+        if sr.over18:
+            return 1
+        elif sr.subscribers < 1000:
+            return 2
+        else:
+            return 0
+    except prawcore.exceptions.Redirect or prawcore.exceptions.NotFound:
+        return 2
+
+
+def reset(bot, update):
+    _, *query = update.message.text.split()
+    if not query or query[0] == 'all':
+        srlist = reddit.front.hot(limit=15)
         for submission in srlist:
             if submission.hidden:
                 submission.unhide()
@@ -116,46 +119,15 @@ def resetposts(bot, update):
             bot.send_message(update.message.chat_id, text="The subreddit /r/{} does not exist!".format(query[0]))
 
 
-def sendfreshpost(bot, update, sr):
-    srlist = sr.hot(limit=10)
-    sent = False
-    for submission in srlist:
-        if submission.stickied or submission.over_18 or submission.hidden:
-            continue
-        else:
-            submission.hide()
-            viewmedia(bot, update.message.chat_id, submission)
-            sent = True
-            break
-    if not sent:
-        bot.send_message(update.message.chat_id, text='Sorry, we seem to have ran out of fresh content')
-
-
-def fetchfresh(bot, update):
-    _, *query = update.message.text.split()
-    if not query or query[0] == 'all':
-        sendfreshpost(bot, update, reddit.front)
-    else:
-        try:
-            sr = reddit.subreddit(query[0])
-            if sr.over18:
-                bot.send_message(update.message.chat_id, text="Sorry, the subreddit /r/{} is NSFW".format(query[0]))
-            elif sr.subscribers < 1000:
-                bot.send_message(update.message.chat_id, text="The subreddit /r/{} does not exist!".format(query[0]))
-            else:
-                sendfreshpost(bot, update, sr)
-        except prawcore.exceptions.Redirect or prawcore.exceptions.NotFound:
-            bot.send_message(update.message.chat_id, text="The subreddit /r/{} does not exist!".format(query[0]))
-
-
 def main():
-    updater = Updater(open('.\\TelegramTokenKey.txt').read())
-    updater.dispatcher.add_handler(CommandHandler('all', all))
-    updater.dispatcher.add_handler(CommandHandler('subreddit', getsubreddit))
-    updater.dispatcher.add_handler(CommandHandler('fetch', fetchfresh))
-    updater.dispatcher.add_handler(CommandHandler('reset', resetposts))
-    updater.dispatcher.add_handler(CommandHandler('view', view))
+    updater = Updater(TOKEN)
+    updater.start_webhook(listen="0.0.0.0",
+                          port=int(PORT),
+                          url_path=TOKEN)
     updater.dispatcher.add_handler(CommandHandler('help', help))
+    updater.dispatcher.add_handler(CommandHandler(['r', 'fetch', 'get'], fetchfreshpost))
+    updater.dispatcher.add_handler(CommandHandler('reset', reset))
+    updater.bot.set_webhook("https://" + NAME + ".herokuapp.com/" + TOKEN)
     updater.start_polling()
     updater.idle()
 
