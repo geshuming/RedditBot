@@ -7,7 +7,7 @@ cryptography==2.4.2
 ffmpeg-python==0.1.17
 future==0.17.1
 idna==2.7
-lxml==4.3.0
+lxml==4.9.1
 praw==6.0.0
 prawcore==1.0.0
 pycparser==2.19
